@@ -3,3 +3,4 @@ __pycache__/
 .playwright-mcp/
 data/*.json
 data/*.csv
+output/

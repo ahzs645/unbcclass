@@ -15,7 +15,7 @@ python -m playwright install chromium
 
 ## Use
 
-Full catalogue JSON:
+Full catalogue JSON. By default, this selects all subjects together once per term, so the full scrape is one search per available term:
 
 ```bash
 python scrape_unbc.py --output data/unbc-course-catalogue.json
@@ -26,6 +26,12 @@ Single subject or term:
 ```bash
 python scrape_unbc.py --subject CPSC --output data/cpsc-all-terms.json
 python scrape_unbc.py --term 202601 --subject CPSC --output data/cpsc-202601.json
+```
+
+Force one search per subject instead of selecting all subjects together:
+
+```bash
+python scrape_unbc.py --split-subjects --output data/unbc-course-catalogue-by-subject.json
 ```
 
 CSV:
@@ -49,7 +55,8 @@ python scrape_unbc.py --limit 2 --headful --output data/sample.json
 - JSON also includes `renderedTables` so prerequisite/corequisite tables and other non-section tables are preserved.
 - Each section includes the visible table cells, cell HTML, and parsed nested meeting-time rows when present.
 - CSV flattens one row per course section and stringifies nested values.
-- Full catalogue mode loops every non-`None` term and every subject.
+- Full catalogue mode loops every non-`None` term and selects all subjects together for each term.
+- Use `--split-subjects` if you need one search per term/subject pair.
 - The script writes checkpoint output every 10 searches by default.
 - See `SCRAPING_NOTES.md` for pre-2022 term tests and the SignalR replay experiment.
 - A delay is kept between searches to reduce load on the Blazor Server circuit.

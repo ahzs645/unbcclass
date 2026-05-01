@@ -35,8 +35,9 @@ class Option:
 class Search:
     term_code: str
     term: str
-    subject_code: str
+    subject_codes: tuple[str, ...]
     subject: str
+    subject_options: tuple[Option, ...]
 
 
 def clean_text(value: str | None) -> str:
@@ -65,6 +66,33 @@ def parse_course_title(title: str) -> dict[str, str]:
     if not match:
         return {"courseCode": "", "courseTitle": title}
     return {"courseCode": match.group(1), "courseTitle": match.group(2)}
+
+
+def derive_subject_code(course_code: str, subject_options: tuple[Option, ...]) -> str:
+    parenthetical = re.search(r"\(([A-Z]{2,})\)\s+\d", course_code)
+    if parenthetical:
+        return parenthetical.group(1)
+
+    normalized = clean_text(course_code).lower()
+    matches: list[tuple[int, str]] = []
+    for option in subject_options:
+        candidates = [option.label, option.value]
+        label_without_parenthetical = clean_text(re.sub(r"\([^)]*\)", "", option.label))
+        if label_without_parenthetical:
+            candidates.append(label_without_parenthetical)
+
+        for candidate in candidates:
+            candidate_normalized = clean_text(candidate).lower()
+            if candidate_normalized and (
+                normalized == candidate_normalized or normalized.startswith(f"{candidate_normalized} ")
+            ):
+                matches.append((len(candidate_normalized), option.value))
+
+    if matches:
+        return sorted(matches, reverse=True)[0][1]
+
+    first_token = course_code.split(" ", 1)[0]
+    return re.sub(r"[^A-Z0-9]", "", first_token.upper())
 
 
 async def get_options(page: Page, selector: str, *, skip_null: bool = False) -> list[Option]:
@@ -119,19 +147,23 @@ async def select_term(page: Page, term_code: str) -> None:
     )
 
 
-async def select_subject(page: Page, subject_code: str) -> None:
+async def select_subjects(page: Page, subject_codes: tuple[str, ...]) -> None:
     await page.locator("#filter-subject").evaluate(
-        """(select, subjectCode) => {
+        """(select, subjectCodes) => {
+            const wanted = new Set(subjectCodes);
             for (const option of select.options) {
-                option.selected = option.value === subjectCode;
+                option.selected = wanted.has(option.value);
             }
         }""",
-        subject_code,
+        list(subject_codes),
     )
     await dispatch_blazor_events(page, "#filter-subject")
     await page.wait_for_function(
-        """(subjectCode) => Array.from(document.querySelector("#filter-subject")?.selectedOptions || []).some((option) => option.value === subjectCode)""",
-        arg=subject_code,
+        """(subjectCodes) => {
+            const selected = Array.from(document.querySelector("#filter-subject")?.selectedOptions || []).map((option) => option.value);
+            return subjectCodes.length === selected.length && subjectCodes.every((subjectCode) => selected.includes(subjectCode));
+        }""",
+        arg=list(subject_codes),
     )
 
 
@@ -148,7 +180,7 @@ async def dispatch_blazor_events(page: Page, selector: str) -> None:
 async def run_search(page: Page, search: Search) -> list[dict[str, Any]]:
     before = await results_signature(page)
     await select_term(page, search.term_code)
-    await select_subject(page, search.subject_code)
+    await select_subjects(page, search.subject_codes)
     await page.wait_for_function("""() => !document.querySelector("button.action")?.disabled""")
     await page.locator("button.action").click()
     await wait_for_results_change(page, before)
@@ -273,7 +305,8 @@ async def parse_results(page: Page, search: Search) -> list[dict[str, Any]]:
             {
                 "termCode": search.term_code,
                 "term": search.term,
-                "subjectCode": search.subject_code,
+                "subjectCode": derive_subject_code(parsed_title["courseCode"], search.subject_options),
+                "selectedSubjectCodes": list(search.subject_codes),
                 "subject": search.subject,
                 **parsed_title,
                 **row,
@@ -337,6 +370,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-every", type=int, default=10, help="Write partial output every N searches. Use 0 to disable.")
     parser.add_argument("--hydration-delay", type=float, default=3.0, help="Seconds to wait after Blazor loads before scraping.")
     parser.add_argument("--reuse-page", action="store_true", help="Reuse one Blazor page between searches instead of reloading before each search.")
+    parser.add_argument("--split-subjects", action="store_true", help="When no --subject is provided, run one search per subject instead of selecting all subjects together.")
     return parser.parse_args()
 
 
@@ -353,17 +387,29 @@ async def main() -> None:
 
         terms = filter_options(await get_options(page, "#filter-term-code", skip_null=True), args.term, "term")
         subjects = filter_options(await get_options(page, "#filter-subject"), args.subject, "subject")
-        searches = [Search(term.value, term.label, subject.value, subject.label) for term in terms for subject in subjects]
+        if args.subject or args.split_subjects:
+            searches = [
+                Search(term.value, term.label, (subject.value,), subject.label, tuple(subjects))
+                for term in terms
+                for subject in subjects
+            ]
+        else:
+            all_subject_codes = tuple(subject.value for subject in subjects)
+            searches = [
+                Search(term.value, term.label, all_subject_codes, "All subjects", tuple(subjects))
+                for term in terms
+            ]
         if args.limit:
             searches = searches[: args.limit]
 
-        print(f"Planned searches: {len(searches)} ({len(terms)} terms x {len(subjects)} subjects)")
+        subject_plan = f"{len(subjects)} subjects" if args.subject or args.split_subjects else f"all {len(subjects)} subjects selected together"
+        print(f"Planned searches: {len(searches)} ({len(terms)} terms, {subject_plan})")
         try:
             for index, search in enumerate(searches, start=1):
                 if not args.reuse_page:
                     await wait_for_page(page, args.hydration_delay)
 
-                print(f"[{index}/{len(searches)}] {search.term} / {search.subject_code} {search.subject}", flush=True)
+                print(f"[{index}/{len(searches)}] {search.term} / {search.subject}", flush=True)
                 courses = await run_search(page, search)
                 all_courses.extend(courses)
                 print(f"  courses: {len(courses)} | total course records: {len(all_courses)}", flush=True)
